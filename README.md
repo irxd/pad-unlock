@@ -48,9 +48,14 @@ On a real Vita, the kernel power callback reports sleep and wake with these flag
 | Event | Flags | Meaning |
 |---|---|---|
 | Sleep (power button) | `0x80400000` | `BUTTON_POWER_PRESS` + `APP_SUSPEND` |
-| Wake | `0x00800000` | `APP_RESUMING` |
+| Wake from sleep | `0x00820000`, then `0x00040000` | `APP_RESUMING` + `SYSTEM_RESUMING`, then `SYSTEM_RESUME` |
+| Wake when the system never suspended | `0x00800000` | `APP_RESUMING` |
 
-The plugin arms on `APP_RESUMING`/`APP_RESUME`. It also accepts the `SYSTEM_RESUME*` flags from the SDK headers, which didn't arrive on the test console but may on other models or firmwares. As a fallback, it also arms if the real-time clock jumps forward by more than 3 seconds between two polls.
+The plugin arms on `APP_RESUMING`, `APP_RESUME`, `SYSTEM_RESUMING` or `SYSTEM_RESUME`. As a fallback, it also arms if the real-time clock jumps forward by more than 3 seconds between two polls.
+
+After the first real sleep, the console sets `AFTER_SYSTEM_RESUME` (`0x80`) in every later callback, including sleep and PS-button presses. The plugin ignores that flag, because arming on it would let a button hold swipe on the LiveArea.
+
+Some plugins keep the Vita from fully suspending when you press power: the screen goes off, but the green LED stays on and the battery drains. For example, [vitacompanion](https://github.com/devnoname120/vitacompanion) does this while its `nosleep` option is on, which is the default at every boot; send `nosleep off` to its command port to turn it off. That isn't caused by PadUnlock, which still unlocks after either kind of sleep.
 
 ## Compatibility
 

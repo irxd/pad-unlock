@@ -73,18 +73,20 @@
 
 /* Power callback flags (psp2common/power.h). Any of these means the console
    is waking up, and the lockscreen will be shown.
-   Observed on a real PS Vita (kernel callback): sleep via power button
-   reports 0x80400000 (POWER_PRESS | APP_SUSPEND), wake reports 0x00800000
-   (APP_RESUMING). The SYSTEM_* flags never arrive, but are kept in case
-   other firmwares/models send them. */
-#define PWR_CB_AFTER_SYSTEM_RESUME 0x00000080
+   Observed on a real PS Vita (kernel callback):
+     sleep (power button)  0x80400000  POWER_PRESS | APP_SUSPEND
+     wake from real sleep  0x00820000  APP_RESUMING | SYSTEM_RESUMING,
+                           then 0x00040000 SYSTEM_RESUME
+     wake from screen-off  0x00800000  APP_RESUMING (system never suspended)
+   After the first real resume, 0x80 (AFTER_SYSTEM_RESUME) stays set in every
+   later callback, including sleep and PS-button presses, so it must NOT arm
+   the plugin. */
 #define PWR_CB_SYSTEM_RESUMING     0x00020000
 #define PWR_CB_SYSTEM_RESUME       0x00040000
 #define PWR_CB_APP_RESUME          0x00200000
 #define PWR_CB_APP_RESUMING        0x00800000
-#define PWR_CB_ARM_MASK (PWR_CB_AFTER_SYSTEM_RESUME | PWR_CB_SYSTEM_RESUMING | \
-                         PWR_CB_SYSTEM_RESUME | PWR_CB_APP_RESUME |            \
-                         PWR_CB_APP_RESUMING)
+#define PWR_CB_ARM_MASK (PWR_CB_SYSTEM_RESUMING | PWR_CB_SYSTEM_RESUME | \
+                         PWR_CB_APP_RESUME | PWR_CB_APP_RESUMING)
 
 /* Fallback sleep detection: if wall-clock time jumps forward by more than
    this between two polls (~16 ms apart), the console was asleep. */
