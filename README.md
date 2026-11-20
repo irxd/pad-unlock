@@ -5,7 +5,7 @@ Unlock the PS Vita lockscreen **without touching the screen**, so you don't smud
 When the lockscreen shows, you can:
 
 - **hold any button** (D-pad, ✕ ○ □ △, L, R, Start, Select) for about 0.5 s, or
-- **push both analog sticks** at the same time,
+- **push either analog stick** in any direction,
 
 and the plugin makes the "peel from the top-right corner" swipe for you. Your lockscreen and passcode still work as usual. Unlike [NoLockScreen](https://github.com/TheOfficialFloW/VitaTweaks), this plugin does not remove the lockscreen.
 
@@ -16,7 +16,7 @@ PadUnlock is a kernel plugin. It hooks the SceTouch kernel read functions (`ksce
 The plugin only acts when the lockscreen is on screen:
 
 1. It **arms** at boot and every time the Vita wakes from sleep, because that's when the lockscreen appears.
-2. While armed, the button hold or both sticks start one fake swipe.
+2. While armed, the button hold or a stick push starts one fake swipe.
 3. It **disarms** after that swipe, or after you peel the screen with your own finger.
 
 So holding a button on the LiveArea, where the same corner peel closes the app bubble, does nothing. Games and apps never see the fake finger, because injection only happens for the SceShell process. The plugin doesn't use firmware-specific offsets, so it should work on 3.60–3.74.
@@ -53,10 +53,11 @@ These settings are `#define`s at the top of `src/main.c`:
 | Define | Default | Meaning |
 |---|---|---|
 | `HOLD_MS` | 500 | How long a button must be held |
-| `STICK_THRESHOLD` | 90 | How far both sticks must be pushed (0–127) |
+| `STICK_THRESHOLD` | 90 | How far a stick must be pushed (0–127) |
 | `SWIPE_MS` | 300 | Duration of the fake swipe |
 | `SWIPE_X0/Y0 → X1/Y1` | (1900,20) → (500,900) | Swipe path on the 1920×1088 front panel |
 | `HOLD_BUTTONS` | all except PS/power/volume | Which buttons count |
+| `DEBUG_LOG` | 0 | Set to 1 to write a diagnostic log to `ux0:data/padunlock.log` (power callbacks, arm/disarm, swipes, ignored input) |
 
 ## Credits
 

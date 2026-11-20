@@ -13,7 +13,7 @@
   The plugin is "armed" at boot and every time the console resumes from
   sleep (that is when the lockscreen is shown). While armed:
     - holding any face/d-pad/shoulder/Start/Select button for HOLD_MS, or
-    - pushing BOTH analog sticks away from center at the same time
+    - pushing either analog stick away from center
   triggers the swipe. After the swipe (or after you peel the screen with your
   finger) the plugin disarms itself, so it never interferes with LiveArea
   (where the same corner-peel gesture closes the app bubble) or with games.
@@ -28,6 +28,8 @@
 #include <vitasdkkern.h>
 #include <taihen.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
 
 /* ---------------------------------------------------------------- config */
 
@@ -47,6 +49,10 @@
    manual unlock and disarms the plugin. */
 #define MANUAL_SWIPE_DIST  400
 
+/* Debug log written to LOG_PATH. Set to 0 to disable. */
+#define DEBUG_LOG          0
+#define LOG_PATH           "ux0:data/padunlock.log"
+
 /* Buttons that count for "hold any button" (raw SceCtrl bits so this works
    with old and new vitasdk headers). PS / power / volume are excluded. */
 #define BTN_SELECT   0x00000001
@@ -65,12 +71,26 @@
                       BTN_LEFT | BTN_L | BTN_R | BTN_TRIANGLE | BTN_CIRCLE |   \
                       BTN_CROSS | BTN_SQUARE)
 
-/* Power callback flags (same values as on PSP). */
-#define PWR_CB_RESUMING        0x00020000
-#define PWR_CB_RESUME_COMPLETE 0x00040000
+/* Power callback flags (psp2common/power.h). Any of these means the console
+   is waking up, and the lockscreen will be shown.
+   Observed on a real PS Vita (kernel callback): sleep via power button
+   reports 0x80400000 (POWER_PRESS | APP_SUSPEND), wake reports 0x00800000
+   (APP_RESUMING). The SYSTEM_* flags never arrive, but are kept in case
+   other firmwares/models send them. */
+#define PWR_CB_AFTER_SYSTEM_RESUME 0x00000080
+#define PWR_CB_SYSTEM_RESUMING     0x00020000
+#define PWR_CB_SYSTEM_RESUME       0x00040000
+#define PWR_CB_APP_RESUME          0x00200000
+#define PWR_CB_APP_RESUMING        0x00800000
+#define PWR_CB_ARM_MASK (PWR_CB_AFTER_SYSTEM_RESUME | PWR_CB_SYSTEM_RESUMING | \
+                         PWR_CB_SYSTEM_RESUME | PWR_CB_APP_RESUME |            \
+                         PWR_CB_APP_RESUMING)
+
+/* Fallback sleep detection: if wall-clock time jumps forward by more than
+   this between two polls (~16 ms apart), the console was asleep. */
+#define SLEEP_GAP_US   (3ULL * 1000 * 1000)
 
 #define FRONT_PORT 0
-#define FAKE_TOUCH_ID 0x70
 
 /* ------------------------------------------------------- touch structs */
 /* psp2kern/touch.h doesn't define these; the layout matches psp2/touch.h
@@ -123,10 +143,73 @@ static volatile int armed = 0;
    always see a consistent point. */
 static volatile uint32_t fake_point = 0;
 
+/* Touch ID of the current fake finger. A real panel gives every new contact
+   a new ID, so each swipe gets a fresh one; reusing an ID that SceShell has
+   already seen lift off can make it ignore the new touch. */
+static volatile uint8_t fake_id = 0x40;
+
 /* Real-finger tracking (written by hooks, read by worker). */
 static volatile int real_tracking = 0;
 static volatile int real_x0, real_y0, real_x1, real_y1;
 static volatile int real_manual_unlock = 0;
+
+/* Diagnostics (written by hooks / power callback, logged by worker). */
+static volatile uint32_t stat_shell_polls = 0;  /* front-panel reads by SceShell */
+static volatile uint32_t stat_injected = 0;     /* buffers we overwrote          */
+static volatile uint32_t pwr_cb_count = 0;
+static volatile uint32_t pwr_cb_flags = 0;
+
+/* ------------------------------------------------------------------ log */
+
+#if DEBUG_LOG
+/* Lines are buffered in memory and flushed by the worker thread, so nothing
+   is lost while ux0: isn't mounted yet (early boot, right after resume). */
+static char log_buf[2048];
+static int log_len = 0;
+static int log_started = 0;
+
+static void log_printf(const char *fmt, ...) {
+  char line[160];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(line, sizeof(line), fmt, ap);
+  va_end(ap);
+  if (n <= 0)
+    return;
+  if (n > (int)sizeof(line) - 1)
+    n = sizeof(line) - 1;
+
+  uint32_t ms = (uint32_t)(ksceKernelGetSystemTimeWide() / 1000);
+  char stamp[16];
+  int sn = snprintf(stamp, sizeof(stamp), "[%7u] ", (unsigned)ms);
+
+  if (log_len + sn + n + 1 > (int)sizeof(log_buf))
+    return; /* buffer full, drop */
+  memcpy(log_buf + log_len, stamp, sn);
+  log_len += sn;
+  memcpy(log_buf + log_len, line, n);
+  log_len += n;
+  log_buf[log_len++] = '\n';
+}
+
+static void log_flush(void) {
+  if (log_len == 0)
+    return;
+  int flags = SCE_O_WRONLY | SCE_O_CREAT | (log_started ? SCE_O_APPEND : SCE_O_TRUNC);
+  SceUID fd = ksceIoOpen(LOG_PATH, flags, 0666);
+  if (fd < 0)
+    return; /* ux0: not ready, retry later */
+  ksceIoWrite(fd, log_buf, log_len);
+  ksceIoClose(fd);
+  log_started = 1;
+  log_len = 0;
+}
+#else
+/* Empty function (not an empty macro) so values that only exist for
+   logging still count as used and don't trigger warnings. */
+static inline void log_printf(const char *fmt, ...) { (void)fmt; }
+#define log_flush()     do {} while (0)
+#endif
 
 /* ------------------------------------------------------------ touch hook */
 
@@ -136,20 +219,24 @@ static void process_touch(SceUInt32 port, SceTouchData *data, int count) {
   if (shell_pid <= 0 || ksceKernelGetProcessId() != shell_pid)
     return;
 
+  stat_shell_polls++;
+
   uint32_t fp = fake_point;
 
   if (fp & 0x80000000) {
     /* Replace whatever the panel reported with our single fake finger. */
     uint16_t x = (fp >> 16) & 0xFFF;
     uint16_t y = fp & 0xFFF;
+    uint8_t id = fake_id;
     for (int i = 0; i < count; i++) {
       memset(&data[i].report[0], 0, sizeof(data[i].report[0]));
-      data[i].report[0].id = FAKE_TOUCH_ID;
+      data[i].report[0].id = id;
       data[i].report[0].force = 128;
       data[i].report[0].x = x;
       data[i].report[0].y = y;
       data[i].reportNum = 1;
     }
+    stat_injected++;
     return;
   }
 
@@ -203,7 +290,9 @@ static int ksceTouchReadRegion_patched(SceUInt32 port, SceTouchData *pData, SceU
 /* -------------------------------------------------------- power callback */
 
 static int power_cb(int notifyId, int notifyCount, int powerInfo, void *common) {
-  if (powerInfo & (PWR_CB_RESUMING | PWR_CB_RESUME_COMPLETE))
+  pwr_cb_flags |= (uint32_t)powerInfo; /* accumulate until the worker logs it */
+  pwr_cb_count++;
+  if (powerInfo & PWR_CB_ARM_MASK)
     armed = 1;
   return 0;
 }
@@ -219,30 +308,84 @@ static int stick_out(uint8_t v) {
   return d > STICK_THRESHOLD || d < -STICK_THRESHOLD;
 }
 
+static void start_swipe(SceInt64 *swipe_start, SceInt64 now, const char *why,
+                        const SceCtrlData *ctrl) {
+  /* Fresh touch ID per gesture (1..126, never 0x00/0x7F). */
+  uint8_t id = fake_id + 1;
+  if (id < 1 || id > 126)
+    id = 1;
+  fake_id = id;
+
+  *swipe_start = now;
+  stat_injected = 0;
+  log_printf("swipe start (%s) id=%u btns=%08X lx=%u ly=%u rx=%u ry=%u polls=%u",
+             why, (unsigned)id, (unsigned)ctrl->buttons, ctrl->lx, ctrl->ly,
+             ctrl->rx, ctrl->ry, (unsigned)stat_shell_polls);
+}
+
 static int worker_thread(SceSize args, void *argp) {
   SceUID cb = ksceKernelCreateCallback("padunlock_power_cb", 0, power_cb, NULL);
-  if (cb >= 0)
-    kscePowerRegisterCallback(cb);
+  int reg = cb >= 0 ? kscePowerRegisterCallback(cb) : -1;
+  log_printf("worker start: cb=%08X reg=%08X", (unsigned)cb, (unsigned)reg);
 
-  ksceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
+  int smode = ksceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
+  log_printf("set analog mode: %08X", (unsigned)smode);
 
   SceInt64 hold_start = 0;      /* 0 = no qualifying input held           */
   int need_release = 0;         /* wait for all input released before next */
   SceInt64 swipe_start = 0;     /* 0 = no swipe in progress                */
-  SceInt64 last_tick = ksceKernelGetSystemTimeWide();
+  int was_armed = armed;
+  int logged_disarmed_press = 0;
+  uint32_t seen_pwr_cb = 0;
+  uint32_t poll_mark = 0;
+  SceInt64 poll_mark_time = 0;
+
+  /* The system timer pauses during sleep, so use the wall clock (RTC) to
+     notice that time passed while we weren't running. */
+  SceRtcTick rtc_last = {0};
+  int rtc_ret = ksceRtcGetCurrentTick(&rtc_last);
+  log_printf("rtc first read: ret=%08X", (unsigned)rtc_ret);
 
   while (thread_run) {
     SceInt64 now = ksceKernelGetSystemTimeWide();
 
-    /* Fallback resume detection: a big gap means we were asleep. */
-    if (now - last_tick > 3 * 1000 * 1000)
-      armed = 1;
-    last_tick = now;
+    /* ---- sleep detection ---- */
+    SceRtcTick rtc_now = {0};
+    if (ksceRtcGetCurrentTick(&rtc_now) >= 0) {
+      if (rtc_last.tick && rtc_now.tick > rtc_last.tick + SLEEP_GAP_US) {
+        log_printf("rtc gap %u s -> arm",
+                   (unsigned)((rtc_now.tick - rtc_last.tick) / 1000000ULL));
+        armed = 1;
+      }
+      rtc_last = rtc_now;
+    }
+
+    if (pwr_cb_count != seen_pwr_cb) {
+      seen_pwr_cb = pwr_cb_count;
+      uint32_t f = pwr_cb_flags;
+      pwr_cb_flags = 0;
+      log_printf("power cb #%u flags=%08X", (unsigned)seen_pwr_cb, (unsigned)f);
+    }
+
+    if (armed != was_armed) {
+      log_printf("armed %d -> %d", was_armed, (int)armed);
+      was_armed = armed;
+    }
 
     if (shell_pid <= 0) {
       SceUID pid = ksceKernelSysrootGetShellPid();
-      if (pid > 0)
+      if (pid > 0) {
         shell_pid = pid;
+        log_printf("shell pid %08X", (unsigned)pid);
+      }
+    }
+
+    /* Log how often SceShell reads the touch panel (once every ~5 s while
+       armed), to confirm the hooks still see it after resume. */
+    if (armed && now - poll_mark_time > 5 * 1000 * 1000) {
+      log_printf("shell touch polls: +%u", (unsigned)(stat_shell_polls - poll_mark));
+      poll_mark = stat_shell_polls;
+      poll_mark_time = now;
     }
 
     /* ---- run an active swipe ---- */
@@ -258,6 +401,7 @@ static int worker_thread(SceSize args, void *argp) {
         fake_point = 0;   /* lift finger */
         swipe_start = 0;
         armed = 0;
+        log_printf("swipe end: injected=%u", (unsigned)stat_injected);
       }
       ksceKernelDelayThreadCB(4 * 1000);
       continue;
@@ -267,6 +411,7 @@ static int worker_thread(SceSize args, void *argp) {
     if (real_manual_unlock) {
       real_manual_unlock = 0;
       armed = 0;
+      log_printf("manual finger unlock seen");
     }
 
     /* ---- read input ---- */
@@ -276,25 +421,34 @@ static int worker_thread(SceSize args, void *argp) {
 
     int any_btn = got > 0 && (ctrl.buttons & HOLD_BUTTONS);
     int sticks  = got > 0 &&
-                  (stick_out(ctrl.lx) || stick_out(ctrl.ly)) &&
-                  (stick_out(ctrl.rx) || stick_out(ctrl.ry));
+                  (stick_out(ctrl.lx) || stick_out(ctrl.ly) ||
+                   stick_out(ctrl.rx) || stick_out(ctrl.ry));
 
     if (!any_btn && !sticks) {
       hold_start = 0;
       need_release = 0;
-    } else if (armed && !need_release && shell_pid > 0) {
+      logged_disarmed_press = 0;
+    } else if (!armed || shell_pid <= 0) {
+      if (!logged_disarmed_press) {
+        log_printf("input ignored: armed=%d btns=%08X lx=%u ly=%u rx=%u ry=%u",
+                   (int)armed, (unsigned)ctrl.buttons,
+                   ctrl.lx, ctrl.ly, ctrl.rx, ctrl.ry);
+        logged_disarmed_press = 1;
+      }
+    } else if (!need_release) {
       if (sticks) {
-        swipe_start = now;
+        start_swipe(&swipe_start, now, "stick", &ctrl);
         need_release = 1;
       } else if (!hold_start) {
         hold_start = now;
       } else if (now - hold_start >= (SceInt64)HOLD_MS * 1000) {
-        swipe_start = now;
+        start_swipe(&swipe_start, now, "button", &ctrl);
         need_release = 1;
         hold_start = 0;
       }
     }
 
+    log_flush();
     ksceKernelDelayThreadCB(16 * 1000);
   }
 
@@ -327,6 +481,9 @@ int module_start(SceSize args, void *argp) {
   hooks[HK_READ]        = hook_touch("SceTouch", 0x70C8AACE, HK_READ,        ksceTouchRead_patched);
   hooks[HK_PEEK_REGION] = hook_touch("SceTouch", 0x9B3F7207, HK_PEEK_REGION, ksceTouchPeekRegion_patched);
   hooks[HK_READ_REGION] = hook_touch("SceTouch", 0x9A91F624, HK_READ_REGION, ksceTouchReadRegion_patched);
+
+  log_printf("PadUnlock start: hooks %08X %08X %08X %08X",
+             (unsigned)hooks[0], (unsigned)hooks[1], (unsigned)hooks[2], (unsigned)hooks[3]);
 
   /* Lockscreen is shown at boot too. */
   armed = 1;

@@ -25,6 +25,8 @@ target_link_libraries(padunlock
   SceSysrootForDriver_stub
   SceCtrlForDriver_stub
   ScePowerForDriver_stub
+  SceRtcForDriver_stub
+  SceIofilemgrForDriver_stub
 )
 
 set_target_properties(padunlock
