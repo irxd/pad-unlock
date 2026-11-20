@@ -34,4 +34,9 @@ set_target_properties(padunlock
   COMPILE_FLAGS "-D__VITA_KERNEL__"
 )
 
+option(PADUNLOCK_DEBUG "Write a debug log to ux0:data/padunlock.log" OFF)
+if(PADUNLOCK_DEBUG)
+  target_compile_definitions(padunlock PRIVATE DEBUG_LOG=1)
+endif()
+
 vita_create_self(padunlock.skprx padunlock CONFIG exports.yml UNSAFE)

@@ -1,4 +1,5 @@
 build/
+build-*/
 *.skprx
 *.velf
 *.log

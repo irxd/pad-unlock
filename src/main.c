@@ -49,8 +49,11 @@
    manual unlock and disarms the plugin. */
 #define MANUAL_SWIPE_DIST  400
 
-/* Debug log written to LOG_PATH. Set to 0 to disable. */
+/* Debug log written to LOG_PATH. 0 = off. Enable with
+   cmake -DPADUNLOCK_DEBUG=ON (or -DDEBUG_LOG=1). */
+#ifndef DEBUG_LOG
 #define DEBUG_LOG          0
+#endif
 #define LOG_PATH           "ux0:data/padunlock.log"
 
 /* Buttons that count for "hold any button" (raw SceCtrl bits so this works
@@ -347,6 +350,8 @@ static int worker_thread(SceSize args, void *argp) {
   SceRtcTick rtc_last = {0};
   int rtc_ret = ksceRtcGetCurrentTick(&rtc_last);
   log_printf("rtc first read: ret=%08X", (unsigned)rtc_ret);
+  SceInt64 sys_last = ksceKernelGetSystemTimeWide();
+  SceInt64 heartbeat_time = sys_last;
 
   while (thread_run) {
     SceInt64 now = ksceKernelGetSystemTimeWide();
@@ -355,12 +360,27 @@ static int worker_thread(SceSize args, void *argp) {
     SceRtcTick rtc_now = {0};
     if (ksceRtcGetCurrentTick(&rtc_now) >= 0) {
       if (rtc_last.tick && rtc_now.tick > rtc_last.tick + SLEEP_GAP_US) {
-        log_printf("rtc gap %u s -> arm",
-                   (unsigned)((rtc_now.tick - rtc_last.tick) / 1000000ULL));
+        /* The system timer stops during real sleep, so sys should stay near
+           0 here. A sys value close to the rtc gap means the CPU was awake. */
+        log_printf("rtc gap %u s, sys %u ms -> arm",
+                   (unsigned)((rtc_now.tick - rtc_last.tick) / 1000000ULL),
+                   (unsigned)((now - sys_last) / 1000));
         armed = 1;
       }
       rtc_last = rtc_now;
     }
+    sys_last = now;
+
+#if DEBUG_LOG
+    /* Heartbeat: if these keep appearing while the Vita is "asleep", the CPU
+       never really suspended. */
+    if (now - heartbeat_time > 5LL * 60 * 1000 * 1000) {
+      log_printf("heartbeat armed=%d", (int)armed);
+      heartbeat_time = now;
+    }
+#else
+    (void)heartbeat_time;
+#endif
 
     if (pwr_cb_count != seen_pwr_cb) {
       seen_pwr_cb = pwr_cb_count;
