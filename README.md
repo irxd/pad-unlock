@@ -70,11 +70,32 @@ Some plugins keep the Vita from fully suspending when you press power: the scree
 
 ## Troubleshooting
 
-If the swipe doesn't happen when you expect it to, turn on the debug log:
+### Nothing happens at all
 
-1. Set `DEBUG_LOG` to `1` in `src/main.c`, rebuild, install, and reboot.
-2. Reproduce the problem.
-3. Copy `ux0:data/padunlock.log` to your PC with VitaShell before rebooting again, because the log is overwritten at every boot.
+Usually the plugin isn't being loaded. Check these first:
+
+- **Is it in `config.txt`?** Copying the file into the `tai` folder isn't enough. It must be listed under `*KERNEL` (not `*main` or `*ALL`).
+- **Is it the right `config.txt`?** If `ux0:tai/config.txt` exists, taiHEN uses it and ignores `ur0:tai/config.txt`. Add the line to the file that's actually used, and make sure the path in it matches where the `.skprx` is.
+- **Did you do a full reboot?** Power Off, then On. Kernel plugins only load at boot.
+- **Do you use Ensō?** Without it, HENkaku isn't running yet when the boot lockscreen shows, so the plugin can't unlock it. Run the exploit, then put the Vita to sleep and wake it. It should work on that lockscreen.
+- **Is NoLockScreen installed?** Remove it. It removes the lockscreen this plugin dismisses.
+
+### Debug log
+
+If it still doesn't work, use the debug build. It writes a log to `ux0:data/padunlock.log`.
+
+1. Download `padunlock-debug.skprx` from the [latest release](https://github.com/irxd/pad-unlock/releases/latest), rename it to `padunlock.skprx`, and overwrite your installed copy. Keep the same `config.txt` line.
+2. Do a full reboot (and run the exploit again if you don't use Ensō).
+3. At the boot lockscreen, hold ✕ for about 2 seconds, then push the left stick all the way.
+4. Put the Vita to sleep with the power button, wait about 10 seconds, and wake it. At the lockscreen, hold ✕ for about 2 seconds, then push a stick.
+5. **Before rebooting**, copy `ux0:data/padunlock.log` to your PC with VitaShell. The log is overwritten at every boot.
+6. When reporting an issue, include the log (or say that it wasn't created), your `config.txt`, firmware version, whether you use Ensō, your other plugins, and what happened in steps 3 and 4.
+
+If `padunlock.log` isn't created at all, the plugin isn't loading. Go back to the checklist above.
+
+Switch back to the regular build afterwards. The debug build writes to the memory card while the lockscreen is up.
+
+To build the debug version yourself, run `cmake -S . -B build-debug -DPADUNLOCK_DEBUG=ON && cmake --build build-debug`.
 
 The log records power callbacks and their flags, arm/disarm changes, swipe start and end (with how many touch frames were replaced), ignored input with button and stick values, and how often SceShell reads the touch panel.
 
@@ -116,7 +137,7 @@ These settings are `#define`s at the top of `src/main.c`:
 | `MANUAL_SWIPE_DIST` | 400 | How far a real finger must move to count as a manual unlock (disarms the plugin) |
 | `HOLD_BUTTONS` | all except PS/power/volume | Which buttons count |
 | `PWR_CB_ARM_MASK` | resume flags | Which power callback flags arm the plugin |
-| `DEBUG_LOG` | 0 | Set to 1 to write a diagnostic log to `ux0:data/padunlock.log` |
+| `DEBUG_LOG` | 0 | Set to 1 (or build with `-DPADUNLOCK_DEBUG=ON`) to write a diagnostic log to `ux0:data/padunlock.log` |
 
 ## Credits
 
